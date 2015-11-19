@@ -6,4 +6,4 @@ published: true
 
 My project proposal can be accessed [here][proposal-link].
 
-[proposal-link]: http://google.com
+[proposal-link]: {{ site.baseurl}}/files/project_proposal.pdf
