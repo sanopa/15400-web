@@ -1,9 +1,7 @@
 ---
-layout: post
+layout: pdf
 title:  "Milestone Report"
 published: true
 ---
 
-My 15-300 Milestone Report can be accessed [here][report-link].
-
-[report-link]: {{ site.baseurl}}/files/f15_milestone_report.pdf
+<iframe src="{{site.baseurl}}/files/f15_milestone_report.pdf" width="100%" height="100%"></iframe>
