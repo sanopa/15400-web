@@ -1,0 +1,304 @@
+import sys, re, collections, docx
+from nltk.stem.lancaster import LancasterStemmer
+
+def import_us_and_uk_spelling():
+  file = open('Words-Worldwide-Word-list-UK-US-2009.docx', 'r')
+  document = docx.Document(file)
+
+  dictionary = dict()
+  for p in document.paragraphs:
+    # Match the possible nine spellings
+    match = re.match('([a-z]*\t|\t)([a-z]*\t|\t)([a-z]*\t|\t)([a-z]*\t|\t)' \
+                     '([a-z]*\t|\t)([a-z]*\t|\t)([a-z]*\t?|\t)([a-z]*\t?|\t)' \
+                     '([a-z]*\t?|\t)', p.text)
+    if match:
+      uk_one, uk_two, uk_three, uk_four, us_uk, us_one, us_two, us_three, us_four = \
+        match.group(1).split(), match.group(2).split(), match.group(3).split(), \
+        match.group(4).split(), match.group(5).split(), match.group(6).split(), \
+        match.group(7).split(), match.group(8).split(), match.group(9).split()
+      variants = [us_one, uk_one, uk_two, uk_three, uk_four, us_uk, us_two, us_three, us_four]
+      # Remove the empty ones
+      variants = map(lambda x: '' if len(x) == 0 else str(x[0]), variants)
+      variants = filter(lambda x: len(x) > 0, variants)
+      for v in variants:
+        dictionary[v] = variants
+
+  file.close()
+  return dictionary
+
+# removing underscores from the concept names to be consistent with Scone
+def remove_underscores(word):
+  words = word.split("_")
+  return " ".join(words)
+
+def add_english_names(concept, dictionary, concepts_file):
+  concepts_file.write("(add-english-names (list")
+  for c in dictionary[concept]:
+    concepts_file.write(" {" + c + "}")
+  concepts_file.write(") (list")
+  for c in dictionary[concept]:
+    concepts_file.write(" \"" + c + "\"")
+  concepts_file.write("))\n")
+
+# main function to run to import the concepts
+# use: python import_knext_lexical_concepts.py conceptsfile outputfile
+def import_knext_lexical_concepts():
+  concepts_file = sys.argv[1]
+  output_file = sys.argv[2]
+  concepts = open(concepts_file, 'r')
+  lisp_concepts = open(output_file, 'a')
+  mistakes = open("mistakes.txt", 'w')
+  stemmer = LancasterStemmer()
+  is_not_a = False
+  group_1_2_4 = False
+
+  # branches of study are collected separately as a dictionary and only after
+  # all of them have been inserted they are created as splits
+  branches_of_study = collections.defaultdict(list)
+  us_uk_dictionary = import_us_and_uk_spelling()
+
+  lisp_concepts.write("(in-namespace \"common\")\n")
+  lisp_concepts.write("(new-relation {consists of})\n")
+  lisp_concepts.write("(new-knext-split {thing} '({countable} {uncountable}))\n")
+
+  for line in concepts:
+    # recognizing the different cases
+    # (all x ((x phi.n) <=> (x psi.n))) = eq link
+    # Not one of the cases listed in the original paper.
+    # Some of the cases in the data don't make sense as equalities
+    # (e.g. physical process and process).
+    match = re.search('\(all x \(\(x ([a-z_]*)[1-9]?.n\) <=> \(x ([a-z_]*)[0-9]?.n\)\)\)',
+                      line)
+    if match:
+      phi, psi = remove_underscores(match.group(1)), remove_underscores(match.group(2))
+      if (psi in phi or phi in psi) and stemmer.stem(psi) != stemmer.stem(phi):
+        # If one of the concepts is a substring, it's probably an error
+        # however, make sure to not include same-versions of the word
+        # (e.g. touching and touch)
+        mistakes.write(line)
+
+      # if the two concepts are alternate spellings of each other, create the
+      # concept with the "American" spelling and add the other spellings on
+      elif psi in us_uk_dictionary and phi in us_uk_dictionary and \
+        len(set(us_uk_dictionary[psi]).intersection(us_uk_dictionary[phi])) \
+         == len(us_uk_dictionary[psi]):
+        add_english_names(psi, us_uk_dictionary, lisp_concepts)
+      else:
+        if phi in us_uk_dictionary and phi != us_uk_dictionary[phi][0]:
+          add_english_names(phi, us_uk_dictionary, lisp_concepts)
+          phi = us_uk_dictionary[phi][0]
+        if psi in us_uk_dictionary and psi != us_uk_dictionary[psi][0]:
+          add_english_names(psi, us_uk_dictionary, lisp_concepts)
+          psi = us_uk_dictionary[psi][0]
+        lisp_concepts.write("(new-knext-eq '({" + phi + "} {thing}) ")
+        lisp_concepts.write("'({" + psi + "} {thing}))\n")
+      continue
+
+    # (all x (x phi.n) (not (x psi.n))) = is-not-a link
+    # Not one of the cases listed in the original paper.
+    match = re.search('\(all x \(x ([a-z_]*)[1-9]?.n\) \(not \(x ([a-z_]*)[0-9]?.n\)\)\)',
+                      line)
+    if match:
+      is_not_a = True
+      phi, psi = remove_underscores(match.group(1)), remove_underscores(match.group(2))
+      if phi in us_uk_dictionary and phi != us_uk_dictionary[phi][0]:
+        add_english_names(phi, us_uk_dictionary, lisp_concepts)
+        phi = us_uk_dictionary[phi][0]
+      if psi in us_uk_dictionary and psi != us_uk_dictionary[psi][0]:
+        add_english_names(psi, us_uk_dictionary, lisp_concepts)
+        psi = us_uk_dictionary[psi][0]
+      continue
+
+    if is_not_a:
+      match_amount_of = re.search('\"No( amount of | )' + phi + ' is an?' \
+                                  '( amount of | )' + psi + '\.\"', line)
+      if match_amount_of:
+        phi_amount_of = match_amount_of.group(1)
+        psi_amount_of = match_amount_of.group(2)
+        phi_class = "{countable}" if len(phi_amount_of) == 1 else "{uncountable}"
+        psi_class = "{countable}" if len(psi_amount_of) == 1 else "{uncountable}"
+        lisp_concepts.write("(new-knext-type {" + phi + "} " + phi_class + ")\n")
+        lisp_concepts.write("(new-knext-type {" + psi + "} " + psi_class + ")\n")
+        lisp_concepts.write("(new-is-not-a {" + phi + "} {" + psi + "})\n")
+      is_not_a = False
+      continue
+
+    # group 1: (all x: [x phi.n] [x psi.n]) = is-a link
+    # Every phi is a psi.
+    # group 2: (all x: [x phi.n] [x psi.n]) (mass terms or lexical plurals)
+    # Every amount of phi is an amount of psi.
+    # group 4: (all x: [x phi.n] [x psi.n]) (count & plural or mass)
+    # Every phi is an amount of psi.
+    # (all x: [x phi.n] [x psi.n]) (mass / plural & singular)
+    # Every amount of phi is a psi.
+    match = re.search('\(all x \(x ([a-z_]*)[1-9]?.n\) \(x ([a-z_]*)[0-9]?.n\)\)',
+                      line)
+    if match:
+      group_1_2_4 = True
+      phi, psi = remove_underscores(match.group(1)), remove_underscores(match.group(2))
+      if phi in us_uk_dictionary and phi != us_uk_dictionary[phi][0]:
+        add_english_names(phi, us_uk_dictionary, lisp_concepts)
+        phi = us_uk_dictionary[phi][0]
+      if psi in us_uk_dictionary and psi != us_uk_dictionary[psi][0]:
+        add_english_names(psi, us_uk_dictionary, lisp_concepts)
+        psi = us_uk_dictionary[psi][0]
+      continue
+
+    if group_1_2_4:
+      match_amount_of = re.search('\"Every( amount of | )' + phi + ' is an?' \
+                                  '( amount of | )' + psi + '\.\"', line)
+      if match_amount_of:
+        phi_amount_of = match_amount_of.group(1)
+        psi_amount_of = match_amount_of.group(2)
+        phi_class = "{countable}" if len(phi_amount_of) == 1 else "{uncountable}"
+        psi_class = "{countable}" if len(psi_amount_of) == 1 else "{uncountable}"
+        lisp_concepts.write("(new-knext-is-a '({" + phi + "} " + phi_class + ") ")
+        lisp_concepts.write("'({" + psi + "} " + psi_class + "))\n")
+      group_1_2_4 = False
+      continue
+
+    # group 3:
+    # (gamma.name psi.n) = is-a link between an individual and a type
+    # (The) gamma is/are a psi.
+    match = re.search('\(([a-z_]*)[1-9]?.name ([a-z_]*)[0-9]?.n\)', line)
+    if match:
+      gamma, psi = remove_underscores(match.group(1)), remove_underscores(match.group(2))
+      if gamma in us_uk_dictionary and gamma != us_uk_dictionary[gamma][0]:
+        add_english_names(gamma, us_uk_dictionary, lisp_concepts)
+        gamma = us_uk_dictionary[gamma][0]
+      if psi in us_uk_dictionary and psi != us_uk_dictionary[psi][0]:
+        add_english_names(psi, us_uk_dictionary, lisp_concepts)
+        psi = us_uk_dictionary[psi][0]
+      lisp_concepts.write("(new-knext-type {" + psi + "} {countable})\n")
+      lisp_concepts.write("(new-knext-indv {" + gamma + "} {" + psi + "})\n")
+      continue
+
+    # [(k phi.n) psi.n] (mass & count)
+    # (The) phi is/are a psi.
+    match = re.search('\(\(k ([a-z_]*)[1-9]?.n\) ([a-z_]*)[0-9]?.n\)', line)
+    if match:
+      phi, psi = remove_underscores(match.group(1)), remove_underscores(match.group(2))
+      if phi in us_uk_dictionary and phi != us_uk_dictionary[phi][0]:
+        add_english_names(phi, us_uk_dictionary, lisp_concepts)
+        phi = us_uk_dictionary[phi][0]
+      if psi in us_uk_dictionary and psi != us_uk_dictionary[psi][0]:
+        add_english_names(psi, us_uk_dictionary, lisp_concepts)
+        psi = us_uk_dictionary[psi][0]
+      lisp_concepts.write("(new-knext-is-a '({" + phi + "} {uncountable}) ")
+      lisp_concepts.write("'({" + psi + "} {countable}))\n")
+      continue
+
+    # (all x: [x phi.n] [x item-of.n (k psi.n)]) (count & atomic ensemble)
+    # Every phi is an item of psi.
+    match = re.search('\(all x \(x ([a-z_]*)[1-9]?.n\) ' \
+                      '\(x item-of.n \(k ([a-z_]*)[0-9]?.n\)\)\)',
+                       line)
+    if match:
+      phi, psi = remove_underscores(match.group(1)), remove_underscores(match.group(2))
+      if phi in us_uk_dictionary and phi != us_uk_dictionary[phi][0]:
+        add_english_names(phi, us_uk_dictionary, lisp_concepts)
+        phi = us_uk_dictionary[phi][0]
+      if psi in us_uk_dictionary and psi != us_uk_dictionary[psi][0]:
+        add_english_names(psi, us_uk_dictionary, lisp_concepts)
+        psi = us_uk_dictionary[psi][0]
+      lisp_concepts.write("(new-knext-type {" + phi + "} {countable})\n")
+      lisp_concepts.write("(new-knext-type {" + psi + "} {countable})\n")
+      lisp_concepts.write("(new-statement {" + psi + "} {consists of} {" + phi + "})\n")
+      continue
+
+    # [(k phi.n) branch-of.n (k psi.n)] (branches of study)
+    # (The) phi is/are a branch of (the) psi.
+    # Some cases need to be filtered out, such as when x is a branch of y but also
+    # y is a branch of x.
+    match = re.search('\(\(k ([ a-z_]*)[1-9]?.n\) branch-of.n \(k ([a-z_]*)[0-9]?.n\)\)', line)
+    if match:
+      phi, psi = remove_underscores(match.group(1)), remove_underscores(match.group(2))
+      if phi in us_uk_dictionary and phi != us_uk_dictionary[phi][0]:
+        add_english_names(phi, us_uk_dictionary, lisp_concepts)
+        phi = us_uk_dictionary[phi][0]
+      if psi in us_uk_dictionary and psi != us_uk_dictionary[psi][0]:
+        add_english_names(psi, us_uk_dictionary, lisp_concepts)
+        psi = us_uk_dictionary[psi][0]
+      branches_of_study[psi].append(phi)
+
+    # group 4
+    # (all x: [x phi.n] [x (plur psi.n)]) (mass & singular)
+    # Every amount of phi is an amount of psis.
+    match = re.search('\(all x \(x ([a-z_]*)[1-9]?.n\) ' \
+                      '\(x \(plur ([a-z_]*)[0-9]?.n\)\)\)', line)
+    if match:
+      phi, psi = remove_underscores(match.group(1)), remove_underscores(match.group(2))
+      if phi in us_uk_dictionary and phi != us_uk_dictionary[phi][0]:
+        add_english_names(phi, us_uk_dictionary, lisp_concepts)
+        phi = us_uk_dictionary[phi][0]
+      if psi in us_uk_dictionary and psi != us_uk_dictionary[psi][0]:
+        add_english_names(psi, us_uk_dictionary, lisp_concepts)
+        psi = us_uk_dictionary[psi][0]
+      lisp_concepts.write("(new-knext-type {" + phi + "} {uncountable})\n")
+      lisp_concepts.write("(new-knext-type {" + psi + "} {uncountable})\n")
+      lisp_concepts.write("(new-statement {" + phi + "} {consists of} {" + psi + "})\n")
+      continue
+
+    # group 5: is-a links; all nouns are countable
+    # (all x: [x (plur phi-c.n)] [x (plur psi-c.n)]) (events, both senses)
+    # Every phi is a psi.
+    match = re.search('\(all x \(x \(plur ([a-z_]*)[1-9]?-c.n\)\) ' \
+                      '\(x \(plur ([a-z_]*)[0-9]?-c.n\)\)\)', line)
+    if match:
+      phi, psi = remove_underscores(match.group(1)), remove_underscores(match.group(2))
+      if phi in us_uk_dictionary and phi != us_uk_dictionary[phi][0]:
+        add_english_names(phi, us_uk_dictionary, lisp_concepts)
+        phi = us_uk_dictionary[phi][0]
+      if psi in us_uk_dictionary and psi != us_uk_dictionary[psi][0]:
+        add_english_names(psi, us_uk_dictionary, lisp_concepts)
+        psi = us_uk_dictionary[psi][0]
+      lisp_concepts.write("(new-knext-is-a '({" + phi + "} {countable}) ")
+      lisp_concepts.write("'({" + psi + "} {countable}))\n")
+      continue
+
+    # (all x: [x (plur phi-c.n)] [x psi.n]) (events, ambiguous & count)
+    # Every phi is a psi.
+    match = re.search('\(all x \(x \(plur ([a-z_]*)[0-9]?-c.n\)\) ' \
+                      '\(x ([a-z_]*)[1-9]?.n\)\)', line)
+    if match:
+      phi, psi = remove_underscores(match.group(1)), remove_underscores(match.group(2))
+      if phi in us_uk_dictionary and phi != us_uk_dictionary[phi][0]:
+        add_english_names(phi, us_uk_dictionary, lisp_concepts)
+        phi = us_uk_dictionary[phi][0]
+      if psi in us_uk_dictionary and psi != us_uk_dictionary[psi][0]:
+        add_english_names(psi, us_uk_dictionary, lisp_concepts)
+        psi = us_uk_dictionary[psi][0]
+      lisp_concepts.write("(new-knext-is-a '({" + phi + "} {countable}) ")
+      lisp_concepts.write("'({" + psi + "} {countable}))\n")
+      continue
+
+    # (all x: [x phi.n] [x (plur psi-c.n)]) (events, count & ambiguous)
+    # Every phi is a psi.
+    match = re.search('\(all x \(x ([a-z_]*)[1-9]?.n\) ' \
+                      '\(x \(plur ([a-z_]*)[0-9]?-c.n\)\)\)', line)
+    if match:
+      phi, psi = remove_underscores(match.group(1)), remove_underscores(match.group(2))
+      if phi in us_uk_dictionary and phi != us_uk_dictionary[phi][0]:
+        add_english_names(phi, us_uk_dictionary, lisp_concepts)
+        phi = us_uk_dictionary[phi][0]
+      if psi in us_uk_dictionary and psi != us_uk_dictionary[psi][0]:
+        add_english_names(psi, us_uk_dictionary, lisp_concepts)
+        psi = us_uk_dictionary[psi][0]
+      lisp_concepts.write("(new-knext-is-a '({" + phi + "} {countable}) ")
+      lisp_concepts.write("'({" + psi + "} {countable}))\n")
+      continue
+
+  # After all branches of study have been collected, convert them into Scone
+  # splits.
+  for k, v in branches_of_study.iteritems():
+    if len(v) > 0:
+      lisp_concepts.write("(new-knext-split {" + k + "} '( ")
+      for b in v:
+        lisp_concepts.write("{" + b + "} ")
+      lisp_concepts.write("))\n")
+
+  concepts.close()
+  lisp_concepts.close()
+  mistakes.close()
+
+import_knext_lexical_concepts()
