@@ -1,0 +1,124 @@
+import sys, re, collections, docx
+from nltk.parse.stanford import StanfordDependencyParser
+from nltk.corpus import wordnet as wn
+
+# removing underscores from the concept names to be consistent with Scone
+def remove_underscores(word):
+  words = word.split("_")
+  return " ".join(words)
+
+scone_import_file = sys.argv[1]
+scone_file = open(scone_import_file, 'a')
+path_to_jar = '../11-411/NLP/stanford-parser/stanford-parser.jar'
+path_to_models_jar = '../11-411/NLP/stanford-parser/stanford-parser-3.5.2-models.jar'
+dependency_parser = StanfordDependencyParser(path_to_jar=path_to_jar,
+                                             path_to_models_jar = path_to_models_jar)
+
+# wordnet = open('WordNet-3.0/dict/data.noun')
+# for line in wordnet:
+#   match = re.match('[0-9]* [0-9]* ([a-z]) [0-9]* ([a-z]*) .* \| (.*)\n', line)
+#   if match:
+#     pos = match.group(1)
+#     word = match.group(2)
+#     gloss = match.group(3)
+#     split = gloss.split(";")
+    # parse = dependency_parser.raw_parse(word + " is " + split[0])
+    # dependencies = parse.next()
+
+    # the dependencides have the superclass at the top of the tree
+    # since that's the main portion of the definition
+    # superclass = dependencies.tree()[0]
+
+# "entity" is the highest node out of all WordNet nouns
+root = wn.synset('entity.n.01')
+
+# DFS through the WordNet hyper/hyponym graph
+visited = set()
+visited.add(root)
+scone_file.write("(new-wordnet-type {" + root.name() + "} {thing})\n")
+typ, inst = 't', 'i'
+stack = [(r, root, typ) for r in root.hyponyms()]
+# holonyms will be added at the end
+# each list element will be (x, y, t) where x is a holonym of y and t is either
+# a part, substance, or member type
+part, substance, member = 'p', 's', 'm'
+holonyms = []
+parent = root
+while len(stack) > 0:
+  current, parent, tp = stack.pop()
+  if (current, parent, tp) not in visited:
+    visited.add((current, parent, tp))
+    if tp == typ:
+      scone_file.write("(new-wordnet-type {")
+    else:
+      scone_file.write("(new-wordnet-indv {")
+    scone_file.write(current.name() + "} {" + parent.name() + "})\n")
+    scone_file.write("(english {" + current.name() + "}")
+    for lemma in current.lemmas():
+      scone_file.write(" \"" + remove_underscores(lemma.name()) + "\"")
+    scone_file.write(")\n")
+    for instance in current.instance_hyponyms():
+      stack.append((instance, current, inst))
+    for hyp in current.hyponyms():
+      stack.append((hyp, current, typ))
+    for h in current.part_holonyms():
+      holonyms.append((h, current, part))
+    for h in current.substance_holonyms():
+      holonyms.append((h, current, substance))
+    for h in current.member_holonyms():
+      holonyms.append((h, current, member))
+
+    # if the definition is composed of several "sentences", take the first one
+    # for now
+    defn = current.definition()
+    split_by_semi = defn.split("; ")
+    if len(split_by_semi) > 1:
+      defn = split_by_semi[0]
+
+    # parse the definition
+    parse = dependency_parser.raw_parse(defn).next()
+    definition_triples = list(parse.triples())
+    # the first pair in the dependency triples is the top of the tree; ~ matches
+    # the actual hypernym, so use relations with that word to add information
+    # to Scone
+    defn_hypernym, defn_hypernym_pos = definition_triples[0][0]
+    # only take the first word if it is a noun of some sort, since the definitions
+    # are sometimes not as accurate and might include verbs or determinants
+    if defn_hypernym_pos[0] == 'N':
+      adj = []
+      for ((p, ppos), rel, (c, cpos)) in definition_triples:
+        if p == defn_hypernym and ppos == defn_hypernym_pos and rel == 'amod':
+          adj.append((c, cpos))
+          if cpos == 'JJP':
+            print current.name(), ": ", c
+
+      for ((p, ppos), rel, (c, cpos)) in definition_triples:
+        if rel == 'conj' and (p, ppos) in adj:
+          print current.name(), p, "conj", c
+        if rel == 'nmod' and ((p == defn_hypernym and ppos == defn_hypernym_pos) \
+        or (c == defn_hypernym and cpos == defn_hypernym_pos)):
+          print current.name(), ":", p, " nmod ", c
+        if rel == 'advmod' and ((p == defn_hypernym and ppos == defn_hypernym_pos) \
+        or (c == defn_hypernym and cpos == defn_hypernym_pos)):
+          print current.name(), ":", p, " advmod ", c
+        if rel == 'acl' and ((p == defn_hypernym and ppos == defn_hypernym_pos) \
+        or (c == defn_hypernym and cpos == defn_hypernym_pos)):
+          print current.name(), ":", p, " acl ", c
+        if rel == 'case' and ((p == defn_hypernym and ppos == defn_hypernym_pos) \
+        or (c == defn_hypernym and cpos == defn_hypernym_pos)):
+          print current.name(), ":", p, " case ", c
+        if rel == 'appos' and ((p == defn_hypernym and ppos == defn_hypernym_pos) \
+        or (c == defn_hypernym and cpos == defn_hypernym_pos)):
+          print current.name(), ":", p, " appos ", c
+
+
+for (x, y, t) in holonyms:
+  relation = ''
+  if t == part:
+    relation = '{part of}'
+  elif t == member:
+    relation = '{member of}'
+  else:
+    relation = '{makes up}'
+  scone_file.write("(new-statement {" + y.name() + "} " + relation + " {" + x.name() + "})\n")
+scone_file.close()
