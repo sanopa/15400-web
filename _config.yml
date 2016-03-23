@@ -17,4 +17,4 @@ github_username: sanopa
 
 # Build settings
 markdown: kramdown
-highlighter: pygments
+highlighter: rouge
