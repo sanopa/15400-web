@@ -1,0 +1,164 @@
+import sys, re, collections
+from nltk.parse.stanford import StanfordDependencyParser, StanfordNeuralDependencyParser
+from pattern.en import conjugate, singularize
+
+path_to_jar = 'stanford-corenlp/stanford-corenlp.jar'
+path_to_models_jar = 'stanford-corenlp/stanford-corenlp-3.5.2-models.jar'
+dependency_parser = StanfordDependencyParser(path_to_jar=path_to_jar,
+                                             path_to_models_jar = path_to_models_jar)
+neural_parser = StanfordNeuralDependencyParser(path_to_jar=path_to_jar,
+                                               path_to_models_jar = path_to_models_jar)
+word = sys.argv[1]
+defn = sys.argv[2]
+
+def extraction(word, defn):
+  intersection_types = []
+  appos_types = []
+  relations = []
+  roles = []
+
+  # parse the definition
+  parse = dependency_parser.raw_parse(defn).next()
+  nparse = neural_parser.raw_parse(defn).next()
+  definition_triples = list(parse.triples())
+  ndefinition_triples = list(nparse.triples())
+
+  # the first pair in the dependency triples is the top of the tree; ~ matches
+  # the actual hypernym, so use relations with that word to add information
+  # to Scone
+  if len(definition_triples) > 0 and len(definition_triples[0]) > 0:
+    defn_hypernym, defn_hypernym_pos = definition_triples[0][0]
+    if len(ndefinition_triples) > 0 and len(ndefinition_triples[0]) > 0:
+      ndefn_hypernym, ndefn_hypernym_pos = ndefinition_triples[0][0]
+    else:
+      ndefn_hypernym, ndefn_hypernym_pos = '', 'Z'
+  else:
+    print "Error: could not find the superclass of the word."
+    return
+
+   # neural network-based & regular parser results don't match
+  parse_tree = None
+  if defn_hypernym_pos[0] == 'N' and ndefn_hypernym_pos[0] == 'N' and defn_hypernym != ndefn_hypernym:
+    print "Error: results from different dependency parsers to not match."
+    return
+  elif defn_hypernym_pos[0] == 'N':
+    parse_tree = parse
+  elif ndefn_hypernym_pos[0] == 'N':
+    parse_tree = nparse
+  else:
+    print "Error: head of dependency tree is not a noun."
+    return
+
+  name = parse_tree.root['word']
+  if 'compound' in parse_tree.root['deps']:
+    # for now, ignore if there are several compounds
+    compound = parse_tree.root['deps']['compound'][0]
+    name = parse_tree.nodes[compound]['word'] + " " + name
+
+  # find the modifier relations and create an intersection type
+  if 'amod' in parse_tree.root['deps']:
+    adjectives = parse_tree.root['deps']['amod']
+    adjectives = [idx for idx in adjectives if parse_tree.nodes[idx]['ctag'] != 'JJR' \
+                                            and parse_tree.nodes[idx]['ctag'] != 'JJS']
+    new_types = []
+    for idx in adjectives:
+      # adjectives have to be {thing}s
+      print "(new-extracted-type {" +  parse_tree.nodes[idx]['word'] + "} {thing} '(:adj))"
+      new_types.append("{" +  parse_tree.nodes[idx]['word'] + "}")
+
+      if 'conj' in parse_tree.nodes[idx]['deps']:
+        for idy in parse_tree.nodes[idx]['deps']['conj']:
+          print "(new-extracted-type {" +  parse_tree.nodes[idy]['word'] + "} {thing} '(:adj))"
+          new_types.append("{" +  parse_tree.nodes[idy]['word'] + "}")
+    # once the entire wordnet is added, attempt to find the most reasonable
+    # sense for the main definition noun, otherwise assign to Scone knowledge
+    intersection_types.extend(new_types)
+
+  if 'appos' in parse_tree.root['deps']:
+    equivalents = parse_tree.root['deps']['appos']
+    equivalents_words = []
+    for idx in equivalents:
+      w = parse_tree.nodes[idx]['word']
+      if 'compound' in parse_tree.nodes[idx]['deps']:
+        # for now, ignore if there are several compounds
+        compound = parse_tree.nodes[idx]['deps']['compound'][0]
+        w = parse_tree.nodes[compound]['word'] + " " + w
+      equivalents_words.append(w)
+    appos_types.extend(equivalents_words)
+
+  if 'nmod' in parse_tree.root['deps']:
+    nmods = parse_tree.root['deps']['nmod']
+    for idx in nmods:
+      if 'case' in parse_tree.nodes[idx]['deps'] and \
+      parse_tree.nodes[parse_tree.nodes[idx]['deps']['case'][0]]['word'] == 'of':
+        w = parse_tree.nodes[idx]['word']
+        if 'compound' in parse_tree.nodes[idx]['deps']:
+        # for now, ignore if there are several compounds
+          compound = parse_tree.nodes[idx]['deps']['compound'][0]
+          w = parse_tree.nodes[compound]['word'] + " " + w
+        roles.append((name, w))
+
+  # pulling out relations
+  if 'acl' in parse_tree.root['deps']:
+    acls = parse_tree.root['deps']['acl']
+    for idx in acls:
+      # make sure the relation is a verb
+      if parse_tree.nodes[idx]['ctag'][0] == 'V':
+        relation = parse_tree.nodes[idx]['word']
+        conjrelation = conjugate(relation, tense='present', person=3, number='singular',
+                             mood='indicative', aspect='imperfective', negated=False)
+
+        compounds = []
+        case_prep = ''
+        nmods = []
+        # find the compound that the relation uses, e.g. "consists of ___"
+        print parse_tree.nodes[idx]['deps']
+        if 'nmod' in parse_tree.nodes[idx]['deps']:
+          nmods.extend(parse_tree.nodes[idx]['deps']['nmod'])
+        if 'dobj' in parse_tree.nodes[idx]['deps']:
+          nmods.extend(parse_tree.nodes[idx]['deps']['dobj'])
+        if len(nmods) == 0 and 'xcomp' in parse_tree.nodes[idx]['deps']:
+          xcomp_idx = parse_tree.nodes[idx]['deps']['xcomp'][0]
+          if parse_tree.nodes[xcomp_idx]['ctag'][0] == 'N':
+            nmods.append(xcomp_idx)
+
+        for idy in nmods:
+          w = parse_tree.nodes[idy]['word']
+          if 'compound' in parse_tree.nodes[idy]['deps']:
+            # for now, ignore if there are several compounds
+            compound = parse_tree.nodes[idy]['deps']['compound'][0]
+            w = parse_tree.nodes[compound]['word'] + " " + w
+          compounds.append(w)
+          if 'case' in parse_tree.nodes[idy]['deps']:
+            # there shouldn't be several cases on a noun
+            case_prep = " " + parse_tree.nodes[parse_tree.nodes[idy]['deps']['case'][0]]['word']
+
+        conjrelation = conjrelation + case_prep
+        print "(new-extracted-relation {" + conjrelation + "})"
+        relations.append((conjrelation, compounds))
+
+  print "(new-extracted-type {" + name + "} {thing})"
+  if len(intersection_types) == 0:
+    # set the "name" to be the parent of the word
+    print "(new-extracted-type {" + word + "} {" + name + "})"
+  else:
+    sys.stdout.write("(new-extracted-type {" + word + "} (new-intersection-type nil '(")
+    for adj in intersection_types:
+      for t in adjectives:
+        sys.stdout.write(t + " ")
+      sys.stdout.write("{" + name + "})))\n")
+
+  for a in appos_types:
+    print "(new-extracted-type {" + a + "} {thing})"
+    print "(new-is-a {" + name + "} {" + a + "})"
+
+  for (rel, compounds) in relations:
+    for c in compounds:
+      print "(new-extracted-type {" + c + "} {thing})"
+      print "(new-statement {" + word + "} " + rel + " {" + c + "})"
+
+  for (role_name, dep_name) in roles:
+    print "(new-extracted-type-role {" + role + "} {thing} {thing})"
+    print "(x-is-a-y-of-z {" + word + "} {" + role_name + "} {" + dep_name + "})"
+
+extraction(word, defn)
