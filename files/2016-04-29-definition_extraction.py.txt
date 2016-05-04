@@ -150,7 +150,7 @@ def extraction(word, defn):
 
   for a in appos_types:
     print "(new-extracted-type {" + a + "} {thing})"
-    print "(new-is-a {" + name + "} {" + a + "})"
+    print "(new-eq {" + name + "} {" + a + "})"
 
   for (rel, compounds) in relations:
     for c in compounds:
